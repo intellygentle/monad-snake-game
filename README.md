@@ -42,6 +42,7 @@ Verify your private key is valid for the Monad testnet.
 
 Check that you have sufficient testnet funds for gas fees.
 
-If you encounter errors, try deleting ~/.snakeGame/config.json and re-entering your private key.
-
-
+donate $MON token to Dev
+```bash
+0xA2F06706683f215c3fc89b6772d703ce60579008
+```
