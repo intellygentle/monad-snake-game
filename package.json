@@ -1,0 +1,18 @@
+{
+  "name": "snake-game",
+  "version": "1.0.0",
+  "description": "A blockchain-based Snake game on Monad testnet",
+  "main": "playSnake.js",
+  "scripts": {
+    "start": "node playSnake.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.2",
+    "prompt-sync": "^4.2.0"
+  },
+  "bin": {
+    "playSnake": "./playSnake.js"
+  },
+  "author": "Intellygentle",
+  "license": "MIT"
+}
