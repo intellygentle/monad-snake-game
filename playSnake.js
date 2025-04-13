@@ -4,6 +4,7 @@ const { ethers } = require("ethers");
 const fs = require("fs").promises;
 const path = require("path");
 const prompt = require("prompt-sync")({ sigint: true });
+const readline = require("readline");
 
 // Configuration
 const MONAD_TESTNET_RPC_URL = "https://testnet-rpc.monad.xyz";
@@ -37,6 +38,7 @@ const SNAKE_GAME_ABI = [
 // Minimal ABI for SnakeNFT contracts
 const NFT_ABI = [
   "function mint() public",
+  "function hasMinted(address account) public view returns (bool)",
 ];
 
 // Store private key in the game folder
@@ -45,7 +47,6 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
 async function getPrivateKey() {
   try {
-    // Try to read existing private key
     await fs.mkdir(CONFIG_DIR, { recursive: true });
     try {
       const config = JSON.parse(await fs.readFile(CONFIG_FILE, "utf8"));
@@ -53,18 +54,15 @@ async function getPrivateKey() {
         return config.privateKey;
       }
     } catch (error) {
-      // File doesn't exist or is invalid, continue to prompt
+      // File doesn't exist or is invalid
     }
 
-    // Prompt for private key without echoing input
     console.log("Please enter your private key (input will be hidden, it will be stored securely in snakeGameConfig/config.json):");
-    const privateKey = prompt("", { echo: "" }); // Empty echo hides input
+    const privateKey = prompt("", { echo: "" });
     const trimmedKey = privateKey.trim();
 
-    // Validate private key format
     try {
       new ethers.Wallet(trimmedKey);
-      // Store private key
       await fs.writeFile(
         CONFIG_FILE,
         JSON.stringify({ privateKey: trimmedKey }, null, 2)
@@ -73,7 +71,7 @@ async function getPrivateKey() {
       return trimmedKey;
     } catch (error) {
       console.error("Invalid private key. Please try again.");
-      return getPrivateKey(); // Retry
+      return getPrivateKey();
     }
   } catch (error) {
     console.error("Error accessing config directory:", error.message);
@@ -88,12 +86,20 @@ async function main() {
 
   // Initialize provider and wallets
   const provider = new ethers.JsonRpcProvider(MONAD_TESTNET_RPC_URL);
-  const players = playerPrivateKeys.map(
-    (key) => new ethers.Wallet(key.trim(), provider)
-  );
+  const players = playerPrivateKeys.map((key) => {
+    const wallet = new ethers.Wallet(key.trim(), provider);
+    console.log(`Player address: ${wallet.address}`);
+    return wallet;
+  });
 
-  console.log(`Playing with ${players.length} player(s):`);
-  players.forEach((p, i) => console.log(`Player ${i + 1}: ${p.address}`));
+  // Check balance
+  for (const player of players) {
+    const balance = await provider.getBalance(player.address);
+    console.log(`Balance for ${player.address}: ${ethers.formatEther(balance)} ETH`);
+    if (balance === 0n) {
+      throw new Error(`Player ${player.address} has no funds`);
+    }
+  }
 
   // Connect to contracts
   const snakeGame = new ethers.Contract(
@@ -107,27 +113,71 @@ async function main() {
     contract: new ethers.Contract(nft.address, NFT_ABI, provider),
   }));
 
-  // Game state per player
-  const gameStates = players.map((player) => ({
-    address: player.address,
-    score: 0,
-    moves: 0,
-    snakeHead: { x: 10, y: 10 }, // Starting position
-    food: [],
-    mintedNFTs: [],
-  }));
-
-  // Start game for each player
+  // Initialize game state
+  const gameStates = [];
   for (const player of players) {
     const gameWithPlayer = snakeGame.connect(player);
+    let score, moves, snakeHead, food;
     try {
-      const tx = await gameWithPlayer.startGame();
-      await tx.wait();
-      console.log(`Player ${player.address} started the game`);
+      score = Number(await gameWithPlayer.getScore(player.address));
+      moves = Number(await gameWithPlayer.playerMoveCount(player.address));
+      snakeHead = await gameWithPlayer.getSnakeHead();
+      food = await gameWithPlayer.getFood();
     } catch (error) {
-      console.error(`Player ${player.address} failed to start:`, error.message);
+      console.error(`Failed to fetch state for ${player.address}:`, error.message);
+      continue;
+    }
+
+    // Check minted NFTs
+    const mintedNFTs = [];
+    for (const nft of nftContracts) {
+      try {
+        const hasMinted = await nft.contract.connect(player).hasMinted(player.address);
+        if (hasMinted) {
+          mintedNFTs.push(nft.class);
+        }
+      } catch (error) {
+        console.error(`Failed to check hasMinted for Class ${nft.class}:`, error.message);
+      }
+    }
+
+    gameStates.push({
+      address: player.address,
+      score,
+      moves,
+      snakeHead,
+      food,
+      mintedNFTs,
+    });
+  }
+
+  if (gameStates.length === 0) {
+    throw new Error("No players could be initialized");
+  }
+
+  // Skip startGame if initialized
+  for (const player of players) {
+    const gameWithPlayer = snakeGame.connect(player);
+    const moves = Number(await gameWithPlayer.playerMoveCount(player.address));
+    if (moves === 0) {
+      try {
+        console.log(`Calling startGame for ${player.address}`);
+        const tx = await gameWithPlayer.startGame({ gasLimit: 100000 });
+        console.log(`startGame tx: ${tx.hash} | data: ${tx.data}`);
+        await tx.wait();
+        console.log(`Player ${player.address} started the game`);
+      } catch (error) {
+        console.error(`Player ${player.address} failed to start:`, error.message);
+        continue;
+      }
+    } else {
+      console.log(`Player ${player.address} already initialized with ${moves} moves`);
     }
   }
+
+  // Log initial state
+  console.log("Initial game state:");
+  displayGameState(gameStates, true);
 
   // Main game loop
   let running = true;
@@ -137,12 +187,10 @@ async function main() {
       const state = gameStates[i];
       const gameWithPlayer = snakeGame.connect(player);
 
-      // Fetch current game state
+      // Fetch latest state
       try {
         state.score = Number(await gameWithPlayer.getScore(player.address));
-        state.moves = Number(
-          await gameWithPlayer.playerMoveCount(player.address)
-        );
+        state.moves = Number(await gameWithPlayer.playerMoveCount(player.address));
         state.snakeHead = await gameWithPlayer.getSnakeHead();
         state.food = await gameWithPlayer.getFood();
       } catch (error) {
@@ -153,23 +201,36 @@ async function main() {
       // Move toward nearest food
       let moveTx;
       if (state.food.length > 0) {
-        const targetFood = state.food[0]; // Simplest: target first food
-        if (targetFood.x > state.snakeHead.x) {
-          moveTx = await gameWithPlayer.moveRight();
-        } else if (targetFood.x < state.snakeHead.x) {
-          moveTx = await gameWithPlayer.moveLeft();
-        } else if (targetFood.y > state.snakeHead.y) {
-          moveTx = await gameWithPlayer.moveDown();
-        } else if (targetFood.y < state.snakeHead.y) {
-          moveTx = await gameWithPlayer.moveUp();
+        const targetFood = state.food[0];
+        console.log(`Player ${player.address} targeting food at (${targetFood.x},${targetFood.y}) from (${state.snakeHead.x},${state.snakeHead.y})`);
+        try {
+          if (targetFood.x > state.snakeHead.x && state.snakeHead.x < 19) {
+            moveTx = await gameWithPlayer.moveRight({ gasLimit: 100000 });
+          } else if (targetFood.x < state.snakeHead.x && state.snakeHead.x > 0) {
+            moveTx = await gameWithPlayer.moveLeft({ gasLimit: 100000 });
+          } else if (targetFood.y > state.snakeHead.y && state.snakeHead.y < 19) {
+            moveTx = await gameWithPlayer.moveDown({ gasLimit: 100000 });
+          } else if (targetFood.y < state.snakeHead.y && state.snakeHead.y > 0) {
+            moveTx = await gameWithPlayer.moveUp({ gasLimit: 100000 });
+          } else {
+            console.log(`No valid move for ${player.address}`);
+            continue;
+          }
+          if (moveTx) {
+            console.log(`Move tx for ${player.address}: ${moveTx.hash} | data: ${moveTx.data}`);
+            await moveTx.wait();
+            state.moves++;
+          }
+        } catch (error) {
+          console.error(`Move failed for ${player.address}:`, error.message);
+          continue;
         }
-        if (moveTx) {
-          await moveTx.wait();
-          state.moves++;
-        }
+      } else {
+        console.log(`No food available for ${player.address}`);
+        continue;
       }
 
-      // Check for NFT minting eligibility
+      // Check NFT minting
       for (const nft of nftContracts) {
         if (
           state.score >= nft.score &&
@@ -177,12 +238,21 @@ async function main() {
         ) {
           try {
             const nftWithPlayer = nft.contract.connect(player);
-            const tx = await nftWithPlayer.mint();
-            await tx.wait();
-            state.mintedNFTs.push(nft.class);
-            console.log(
-              `Player ${player.address} minted NFT Class ${nft.class} at score ${state.score}`
-            );
+            const hasMinted = await nftWithPlayer.hasMinted(player.address);
+            if (!hasMinted) {
+              const tx = await nftWithPlayer.mint({ gasLimit: 200000 });
+              console.log(`Mint tx for Class ${nft.class}: ${tx.hash} | data: ${tx.data}`);
+              await tx.wait();
+              state.mintedNFTs.push(nft.class);
+              console.log(
+                `Player ${player.address} minted NFT Class ${nft.class} at score ${state.score}`
+              );
+            } else {
+              console.log(
+                `Player ${player.address} already minted NFT Class ${nft.class}`
+              );
+              state.mintedNFTs.push(nft.class);
+            }
           } catch (error) {
             console.error(
               `Player ${player.address} failed to mint NFT Class ${nft.class}:`,
@@ -195,14 +265,11 @@ async function main() {
       // Update terminal
       displayGameState(gameStates);
 
-      // Stop if all players have minted Class 10 NFT
-      if (
-        players.every((_, idx) => gameStates[idx].mintedNFTs.includes(10))
-      ) {
+      // Stop after Class 3 for testing
+      if (players.every((_, idx) => gameStates[idx].mintedNFTs.includes(3))) {
         running = false;
       }
 
-      // Delay to avoid overwhelming the testnet
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
@@ -212,13 +279,12 @@ async function main() {
 }
 
 function displayGameState(states, final = false) {
-  // Clear previous output
   if (!final) {
-    process.stdout.write("\x1Bc"); // Clear terminal
+    readline.cursorTo(process.stdout, 0, 0);
+    readline.clearScreenDown(process.stdout);
   }
 
   for (const state of states) {
-    // Draw board
     const board = Array(20)
       .fill()
       .map(() => Array(20).fill("."));
@@ -244,5 +310,3 @@ main()
     console.error(error);
     process.exit(1);
   });
-
-
