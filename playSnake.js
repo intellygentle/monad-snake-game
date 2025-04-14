@@ -121,8 +121,10 @@ async function main() {
     try {
       score = Number(await gameWithPlayer.getScore(player.address));
       moves = Number(await gameWithPlayer.playerMoveCount(player.address));
-      snakeHead = await gameWithPlayer.getSnakeHead();
-      food = await gameWithPlayer.getFood();
+      const rawHead = await gameWithPlayer.getSnakeHead();
+      snakeHead = { x: Number(rawHead.x), y: Number(rawHead.y) };
+      const rawFood = await gameWithPlayer.getFood();
+      food = rawFood.map((f) => ({ x: Number(f.x), y: Number(f.y) }));
     } catch (error) {
       console.error(`Failed to fetch state for ${player.address}:`, error.message);
       continue;
@@ -162,7 +164,7 @@ async function main() {
     if (moves === 0) {
       try {
         console.log(`Calling startGame for ${player.address}`);
-        const tx = await gameWithPlayer.startGame({ gasLimit: 100000 });
+        const tx = await gameWithPlayer.startGame({ gasLimit: 150000 });
         console.log(`startGame tx: ${tx.hash} | data: ${tx.data}`);
         await tx.wait();
         console.log(`Player ${player.address} started the game`);
@@ -191,51 +193,19 @@ async function main() {
       try {
         state.score = Number(await gameWithPlayer.getScore(player.address));
         state.moves = Number(await gameWithPlayer.playerMoveCount(player.address));
-        state.snakeHead = await gameWithPlayer.getSnakeHead();
-        state.food = await gameWithPlayer.getFood();
+        const rawHead = await gameWithPlayer.getSnakeHead();
+        state.snakeHead = { x: Number(rawHead.x), y: Number(rawHead.y) };
+        const rawFood = await gameWithPlayer.getFood();
+        state.food = rawFood.map((f) => ({ x: Number(f.x), y: Number(f.y) }));
+        console.log(`Fetched state: head=(${state.snakeHead.x},${state.snakeHead.y}), score=${state.score}, food=${JSON.stringify(state.food)}`);
       } catch (error) {
         console.error(`Error fetching state for ${player.address}:`, error.message);
         continue;
       }
 
-      // Move toward nearest food
-      let moveTx;
-      if (state.food.length > 0) {
-        const targetFood = state.food[0];
-        console.log(`Player ${player.address} targeting food at (${targetFood.x},${targetFood.y}) from (${state.snakeHead.x},${state.snakeHead.y})`);
-        try {
-          if (targetFood.x > state.snakeHead.x && state.snakeHead.x < 19) {
-            moveTx = await gameWithPlayer.moveRight({ gasLimit: 100000 });
-          } else if (targetFood.x < state.snakeHead.x && state.snakeHead.x > 0) {
-            moveTx = await gameWithPlayer.moveLeft({ gasLimit: 100000 });
-          } else if (targetFood.y > state.snakeHead.y && state.snakeHead.y < 19) {
-            moveTx = await gameWithPlayer.moveDown({ gasLimit: 100000 });
-          } else if (targetFood.y < state.snakeHead.y && state.snakeHead.y > 0) {
-            moveTx = await gameWithPlayer.moveUp({ gasLimit: 100000 });
-          } else {
-            console.log(`No valid move for ${player.address}`);
-            continue;
-          }
-          if (moveTx) {
-            console.log(`Move tx for ${player.address}: ${moveTx.hash} | data: ${moveTx.data}`);
-            await moveTx.wait();
-            state.moves++;
-          }
-        } catch (error) {
-          console.error(`Move failed for ${player.address}:`, error.message);
-          continue;
-        }
-      } else {
-        console.log(`No food available for ${player.address}`);
-        continue;
-      }
-
       // Check NFT minting
       for (const nft of nftContracts) {
-        if (
-          state.score >= nft.score &&
-          !state.mintedNFTs.includes(nft.class)
-        ) {
+        if (state.score >= nft.score && !state.mintedNFTs.includes(nft.class)) {
           try {
             const nftWithPlayer = nft.contract.connect(player);
             const hasMinted = await nftWithPlayer.hasMinted(player.address);
@@ -262,13 +232,49 @@ async function main() {
         }
       }
 
+      // Stop after Class 10
+      if (players.every((_, idx) => gameStates[idx].mintedNFTs.includes(10))) {
+        running = false;
+        break; // Exit for loop immediately
+      }
+
+      // Move toward nearest food
+      let moveTx;
+      if (state.food.length > 0) {
+        const targetFood = state.food[0];
+        console.log(`Player ${player.address} targeting food at (${targetFood.x},${targetFood.y}) from (${state.snakeHead.x},${state.snakeHead.y})`);
+        try {
+          if (targetFood.x > state.snakeHead.x && state.snakeHead.x < 19) {
+            moveTx = await gameWithPlayer.moveRight({ gasLimit: 150000 });
+          } else if (targetFood.x < state.snakeHead.x && state.snakeHead.x > 0) {
+            moveTx = await gameWithPlayer.moveLeft({ gasLimit: 150000 });
+          } else if (targetFood.y > state.snakeHead.y && state.snakeHead.y < 19) {
+            moveTx = await gameWithPlayer.moveDown({ gasLimit: 150000 });
+          } else if (targetFood.y < state.snakeHead.y && state.snakeHead.y > 0) {
+            moveTx = await gameWithPlayer.moveUp({ gasLimit: 150000 });
+          } else {
+            console.log(`No valid move for ${player.address}`);
+            await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait before retry
+            continue;
+          }
+          if (moveTx) {
+            console.log(`Move tx for ${player.address}: ${moveTx.hash} | data: ${moveTx.data}`);
+            await moveTx.wait();
+            state.moves++;
+            console.log(`Move completed: new head=(${state.snakeHead.x},${state.snakeHead.y})`);
+          }
+        } catch (error) {
+          console.error(`Move failed for ${player.address}:`, error.message);
+          continue;
+        }
+      } else {
+        console.log(`No food available for ${player.address}`);
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait before retry
+        continue;
+      }
+
       // Update terminal
       displayGameState(gameStates);
-
-      // Stop after Class 3 for testing
-      if (players.every((_, idx) => gameStates[idx].mintedNFTs.includes(3))) {
-        running = false;
-      }
 
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
